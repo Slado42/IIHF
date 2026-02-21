@@ -3,21 +3,20 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 import pandas as pd
-import time
 from game_winning_goals import extract_gwg
 import tempfile
 from selenium.webdriver.chrome.options import Options
 
-options = Options()
-options.add_argument(f"--user-data-dir={tempfile.mkdtemp()}")
 def extract_other_stats(url_name):
-    # Path to your ChromeDriver
-    chrome_driver_path = "/Users/david.sladek/Documents/repos/playground/IIHF/chromedriver-mac/chromedriver"  # Replace with your actual path
+    options = Options()
+    options.add_argument(f"--user-data-dir={tempfile.mkdtemp()}")
 
-    # Set up WebDriver with explicit wait capability
-    service = Service(chrome_driver_path)
-    driver = webdriver.Chrome(service=service)
+    # webdriver-manager automatically downloads the ChromeDriver version
+    # that matches the installed Chrome browser.
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
     wait = WebDriverWait(driver, 15)
 
     try:

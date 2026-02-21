@@ -4,10 +4,20 @@ import re
 from bs4 import BeautifulSoup
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from config import CREDENTIALS_PATH, SHEETS_SCOPE, SPREADSHEETS, LINEUPS_SHEET, LINEUPS_CSV
+from config import CREDENTIALS_PATH, SHEETS_SCOPE, SPREADSHEETS, LINEUPS_SHEET, LINEUPS_CSV, CHAMPIONSHIP_URL
+
+def make_session():
+    """Create a requests session with browser-like headers to avoid Cloudflare 403."""
+    s = requests.Session()
+    s.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+    s.get(CHAMPIONSHIP_URL)  # prime session cookies
+    return s
 
 def extract_players_from_team_page(team_url, country_code, team_abbr):
-    response = requests.get(team_url)
+    session = make_session()
+    response = session.get(team_url)
     soup = BeautifulSoup(response.content, 'html.parser')
     table = soup.find('table', class_='s-table')
     players = []
@@ -81,8 +91,9 @@ def extract_players_from_team_page(team_url, country_code, team_abbr):
     return filtered_players
 
 def get_teams_df():
-    url = 'https://www.iihf.com/en/events/2025/wm/teams'
-    response = requests.get(url)
+    url = f'{CHAMPIONSHIP_URL}/teams'
+    session = make_session()
+    response = session.get(url)
     soup = BeautifulSoup(response.content, 'html.parser')
     team_links = soup.find_all('a', class_='s-country-title')
     team_data = []

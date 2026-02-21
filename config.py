@@ -3,6 +3,14 @@ Common configuration settings for the IIHF scraper project
 """
 import os
 
+# ── Championship URL ──────────────────────────────────────────
+# Update this for each new championship.
+# Examples:
+#   2025 World Championship:    https://www.iihf.com/en/events/2025/wm
+#   2026 World Juniors (WM20):  https://www.iihf.com/en/events/2026/wm20
+#   2026 World Championship:    https://www.iihf.com/en/events/2026/wm
+CHAMPIONSHIP_URL = "https://www.iihf.com/en/events/2026/wm20"
+
 # Credentials path
 CREDENTIALS_PATH = "/Users/david.sladek/Documents/repos/playground/IIHF/credentials/iihf-449710-b400daf9886d.json"
 
