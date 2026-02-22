@@ -24,3 +24,12 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Web backend
+web/backend/*.db
+web/backend/.env
+
+# Web frontend
+web/frontend/node_modules/
+web/frontend/dist/
+web/frontend/.env
