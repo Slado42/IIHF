@@ -2,7 +2,6 @@ import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 from datetime import datetime
-from match_stats_scraper import extract_all_stats
 from config import CHAMPIONSHIP_URL
 
 # URL of the IIHF website schedule page
@@ -47,15 +46,19 @@ if response.status_code == 200:
         if not gamecenter_link:
             continue  # skip cards without a gamecenter link (e.g. upcoming games)
 
-        # Extract team acronyms from data attributes instead of HTML elements
+        # Extract team acronyms and metadata from data attributes
         home_team = card.get('data-hometeam', 'N/A')
         away_team = card.get('data-guestteam', 'N/A')
+        # Prefer UTC time from data attribute for accurate lock-check storage
+        time_utc = card.get('data-time-utc', time)[:5]  # "HH:MM:SS" → "HH:MM"
+        phase = card.get('data-phase', 'PreliminaryRound')
 
         matches.append({
             'date': date,
-            'time': time,
+            'time': time_utc,
             'home_team': home_team,
             'away_team': away_team,
+            'phase': phase,
             'url_playbyplay': f"https://www.iihf.com{gamecenter_link}"
         })
 
@@ -64,9 +67,18 @@ if response.status_code == 200:
     df['url_playbyplay'] = df['url_playbyplay'].apply(lambda x: x[:x.rfind('/') + 1])
     df['url_statistics'] = df['url_playbyplay'].str.replace('gamecenter/playbyplay', 'gamecenter/statistics')
 
-    # Convert date strings to datetime objects for calculating championship days
-    # Parse date format (assuming format is like '10 MAY')
-    df['datetime'] = pd.to_datetime(df['date'] + ' 2024', format='%d %b %Y', errors='coerce')
+    # Convert date strings to datetime objects for calculating championship days.
+    # For cross-year tournaments (e.g. Dec–Jan) assign the correct year per month:
+    # Oct–Dec belong to the earlier calendar year; Jan onwards to the later year.
+    def _assign_year(date_str):
+        month_str = date_str.split()[-1].upper()
+        return 2025 if month_str in ('SEP', 'OCT', 'NOV', 'DEC') else 2026
+
+    df['_year'] = df['date'].apply(_assign_year)
+    df['datetime'] = pd.to_datetime(
+        df['date'] + ' ' + df['_year'].astype(str), format='%d %b %Y', errors='coerce'
+    )
+    df.drop('_year', axis=1, inplace=True)
 
     # Sort by date to ensure proper day calculation
     df = df.sort_values('datetime')

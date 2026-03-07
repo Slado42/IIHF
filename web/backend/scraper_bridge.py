@@ -9,11 +9,11 @@ Usage (CLI):
 import sys
 import os
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # Add the root IIHF directory to sys.path so scraper modules are importable
 ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(ROOT))
+sys.path.append(str(ROOT))  # append so web/backend/app/ takes priority over root app.py
 
 from app.database import SessionLocal
 from app.models import Player, Match, PlayerStat
@@ -21,10 +21,21 @@ from app.models import Player, Match, PlayerStat
 
 def import_players_to_db():
     """Scrape team rosters and write to the players table."""
-    from lineups_scraper import scrape_and_process
+    from lineups_scraper import get_teams_df, extract_players_from_team_page
     import pandas as pd
 
-    df = scrape_and_process()  # returns DataFrame with name/position/country/team_abbr
+    # Call individual scraper functions to avoid the Google Sheets upload dependency
+    df_teams = get_teams_df()
+    all_players = []
+    for _, team_row in df_teams.iterrows():
+        print(f"Scraping {team_row['country_name']} ({team_row['team_abbr']})...")
+        players = extract_players_from_team_page(
+            team_row["team_url"], team_row["country"], team_row["team_abbr"]
+        )
+        all_players.extend(players)
+        print(f"  Found {len(players)} players")
+    df = pd.DataFrame(all_players)
+
     db = SessionLocal()
     try:
         year = datetime.now().year
@@ -78,6 +89,9 @@ def import_matches_to_db():
 
     df = pd.read_csv(csv_path)
     db = SessionLocal()
+    # Shift all match dates forward so the tournament maps onto the current calendar.
+    # 72 days: Dec 26, 2025 → Mar 8, 2026 (treat today as tournament Day 1).
+    DATE_SHIFT_DAYS = 72
     try:
         year = datetime.now().year
         for _, row in df.iterrows():
@@ -87,13 +101,20 @@ def import_matches_to_db():
                 Match.day == row["Day"],
             ).first()
             if not existing:
-                # Parse date and time
+                # Parse date and time.
+                # For cross-year tournaments: months Oct–Dec belong to year-1.
                 try:
+                    month_num = datetime.strptime(row["date"].split()[-1], "%b").month
+                    row_year = year - 1 if month_num >= 10 else year
                     match_dt = datetime.strptime(
-                        f"{row['date']} {row['time']} {year}", "%d %b %H:%M %Y"
+                        f"{row['date']} {row['time']} {row_year}", "%d %b %H:%M %Y"
                     )
+                    match_dt += timedelta(days=DATE_SHIFT_DAYS)
                 except Exception:
                     match_dt = datetime.now()
+                # Map IIHF phase to stage: PreliminaryRound → group, else playoff
+                phase = row.get("phase", "PreliminaryRound")
+                stage = "group" if phase == "PreliminaryRound" else "playoff"
                 db.add(Match(
                     day=int(row["Day"]),
                     date=match_dt.date(),
@@ -101,6 +122,7 @@ def import_matches_to_db():
                     home_team=row["home_team"],
                     away_team=row["away_team"],
                     status="upcoming",
+                    stage=stage,
                     url_playbyplay=row.get("url_playbyplay"),
                     url_statistics=row.get("url_statistics"),
                 ))
