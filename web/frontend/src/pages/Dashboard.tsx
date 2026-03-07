@@ -45,8 +45,6 @@ export default function Dashboard() {
       const res = await getTodaysMatches();
       setMatches(res.data);
       if (res.data.length > 0) setDay(res.data[0].day);
-      const locked = new Set<number>();
-      setLockedIds(locked);
     } catch {
       // no matches today or offline
     }
@@ -80,6 +78,11 @@ export default function Dashboard() {
         });
       }
 
+      const newLocked = new Set<number>();
+      for (const entry of res.data.lineup) {
+        if (entry.locked) newLocked.add(entry.player_id);
+      }
+      setLockedIds(newLocked);
       setSlots(newSlots);
       setCaptainKey(newCaptain);
     } catch {
@@ -225,6 +228,7 @@ export default function Dashboard() {
         <PlayerPickerModal
           position={pickerSlot.position}
           alreadySelectedIds={selectedIds}
+          day={day}
           onSelect={(player) => {
             setSlots((prev) => ({ ...prev, [pickerSlot.key]: player }));
           }}

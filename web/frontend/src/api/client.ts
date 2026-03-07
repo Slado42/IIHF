@@ -42,8 +42,8 @@ export const login = (username: string, password: string) => {
 
 export const getMe = () => api.get<User>("/auth/me");
 
-export const getPlayers = (position?: string, team?: string) =>
-  api.get<Player[]>("/players", { params: { position, team } });
+export const getPlayers = (position?: string, team?: string, day?: number) =>
+  api.get<Player[]>("/players", { params: { position, team, day } });
 
 export const getTodaysMatches = () => api.get<Match[]>("/matches/today");
 

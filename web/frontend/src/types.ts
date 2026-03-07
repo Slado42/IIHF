@@ -11,6 +11,7 @@ export interface Player {
   position: "Forward" | "Defender" | "Goalkeeper";
   team_abbr: string;
   championship_year: number;
+  is_locked?: boolean;
 }
 
 export interface Match {

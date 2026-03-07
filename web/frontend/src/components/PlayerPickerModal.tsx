@@ -5,18 +5,19 @@ import type { Player, Position } from "../types";
 interface Props {
   position: Position;
   alreadySelectedIds: Set<number>;
+  day: number;
   onSelect: (player: Player) => void;
   onClose: () => void;
 }
 
-export default function PlayerPickerModal({ position, alreadySelectedIds, onSelect, onClose }: Props) {
+export default function PlayerPickerModal({ position, alreadySelectedIds, day, onSelect, onClose }: Props) {
   const [players, setPlayers] = useState<Player[]>([]);
   const [search, setSearch] = useState("");
   const [teamFilter, setTeamFilter] = useState("");
 
   useEffect(() => {
-    getPlayers(position).then((res) => setPlayers(res.data));
-  }, [position]);
+    getPlayers(position, undefined, day).then((res) => setPlayers(res.data));
+  }, [position, day]);
 
   const teams = [...new Set(players.map((p) => p.team_abbr))].sort();
 
@@ -60,7 +61,9 @@ export default function PlayerPickerModal({ position, alreadySelectedIds, onSele
             <p className="text-center text-gray-500 py-6 text-sm">No players found</p>
           )}
           {filtered.map((player) => {
-            const disabled = alreadySelectedIds.has(player.id);
+            const selected = alreadySelectedIds.has(player.id);
+            const locked = player.is_locked ?? false;
+            const disabled = selected || locked;
             return (
               <button
                 key={player.id}
@@ -74,7 +77,8 @@ export default function PlayerPickerModal({ position, alreadySelectedIds, onSele
               >
                 <span className="text-xs font-mono text-gray-400 w-8">{player.team_abbr}</span>
                 <span className="text-sm text-white flex-1">{player.name}</span>
-                {disabled && <span className="text-xs text-gray-500">Selected</span>}
+                {locked && <span className="text-xs text-red-400">🔒 Locked</span>}
+                {selected && !locked && <span className="text-xs text-gray-500">Selected</span>}
               </button>
             );
           })}
