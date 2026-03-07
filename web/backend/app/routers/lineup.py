@@ -74,13 +74,46 @@ def save_lineup(
                 detail=f"Too many {position}s: max {limit}, got {position_counts[position]}",
             )
 
-    # Check lock status: refuse if player's match already started
+    # Check lock status and player usage limits
     for lp in body.players:
         player = player_objects[lp.player_id]
         if _check_player_locked(player, db):
             raise HTTPException(
                 status_code=422,
                 detail=f"Player {player.name}'s match has already started and cannot be added",
+            )
+
+        # Determine stage from today's match for this player's team
+        today_match = db.query(Match).filter(
+            Match.day == body.day,
+            (Match.home_team == player.team_abbr) | (Match.away_team == player.team_abbr),
+        ).first()
+        stage = today_match.stage if today_match else "group"
+        usage_limit = 3 if stage == "group" else 1
+
+        # Count prior days this player was used in the same stage (exclude today to allow re-saves)
+        prior_uses = (
+            db.query(DailyLineup)
+            .join(
+                Match,
+                and_(
+                    Match.day == DailyLineup.day,
+                    Match.stage == stage,
+                    (Match.home_team == player.team_abbr) | (Match.away_team == player.team_abbr),
+                ),
+            )
+            .filter(
+                DailyLineup.user_id == current_user.id,
+                DailyLineup.player_id == player.id,
+                DailyLineup.day != body.day,
+            )
+            .count()
+        )
+        if prior_uses >= usage_limit:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{player.name} has already been used {prior_uses}× "
+                       f"(limit: {usage_limit} in {stage} stage)",
             )
 
     # Upsert lineup entries

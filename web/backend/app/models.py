@@ -44,6 +44,7 @@ class Match(Base):
     home_team: Mapped[str] = mapped_column(String, nullable=False)
     away_team: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, default="upcoming")  # upcoming/live/completed
+    stage: Mapped[str] = mapped_column(String, default="group")      # group/playoff
     url_playbyplay: Mapped[str | None] = mapped_column(String)
     url_statistics: Mapped[str | None] = mapped_column(String)
 
