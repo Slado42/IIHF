@@ -102,7 +102,7 @@ class TestSaveLineup:
         assert response.status_code == 422
 
     def test_save_lineup_no_captain(self, client, auth_headers, player_ids):
-        """Valid slot counts but no captain flag set should return 422."""
+        """Valid slot counts with no captain should succeed (captain can be set later)."""
         payload = {
             "day": 1,
             "players": [
@@ -111,7 +111,42 @@ class TestSaveLineup:
             ],
         }
         response = client.post("/lineup/me", json=payload, headers=auth_headers)
-        assert response.status_code == 422
+        assert response.status_code == 200
+
+    def test_player_swap_removes_old_player(self, client, auth_headers, db, player_ids):
+        """Saving a new lineup that replaces a player removes the old one from the DB."""
+        # Save initial lineup with player_ids[0..5]
+        payload = _standard_lineup(player_ids, captain_index=0)
+        r1 = client.post("/lineup/me", json=payload, headers=auth_headers)
+        assert r1.status_code == 200
+
+        # Create a replacement forward
+        new_fwd = Player(name="NewFwd", position="Forward", team_abbr="TST", championship_year=2026)
+        db.add(new_fwd)
+        db.commit()
+
+        # Save again: replace player_ids[2] (Forward) with new_fwd
+        updated_payload = {
+            "day": 1,
+            "players": [
+                {"player_id": player_ids[0], "is_captain": True},
+                {"player_id": player_ids[1], "is_captain": False},
+                {"player_id": new_fwd.id, "is_captain": False},  # replaces player_ids[2]
+                {"player_id": player_ids[3], "is_captain": False},
+                {"player_id": player_ids[4], "is_captain": False},
+                {"player_id": player_ids[5], "is_captain": False},
+            ],
+        }
+        r2 = client.post("/lineup/me", json=updated_payload, headers=auth_headers)
+        assert r2.status_code == 200
+
+        # GET should return exactly 6 players and NOT include the removed player
+        get_resp = client.get("/lineup/me?day=1", headers=auth_headers)
+        data = get_resp.json()
+        returned_ids = {entry["player_id"] for entry in data["lineup"]}
+        assert len(data["lineup"]) == 6
+        assert player_ids[2] not in returned_ids
+        assert new_fwd.id in returned_ids
 
     def test_save_lineup_multiple_captains(self, client, auth_headers, player_ids):
         """Two players with is_captain=True should return 422."""

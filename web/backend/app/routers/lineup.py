@@ -52,10 +52,10 @@ def save_lineup(
     if not body.players:
         raise HTTPException(status_code=422, detail="No players submitted")
 
-    # Validate captain count
+    # Validate captain count (0 or 1 allowed; captain can be set later)
     captains = [p for p in body.players if p.is_captain]
-    if len(captains) != 1:
-        raise HTTPException(status_code=422, detail="Exactly one captain must be selected")
+    if len(captains) > 1:
+        raise HTTPException(status_code=422, detail="At most one captain can be selected")
 
     # Fetch player objects and validate positions
     position_counts: dict[str, int] = {}
@@ -115,6 +115,21 @@ def save_lineup(
                 detail=f"{player.name} has already been used {prior_uses}× "
                        f"(limit: {usage_limit} in {stage} stage)",
             )
+
+    # Remove unlocked entries that are no longer in the submitted lineup
+    new_player_ids = {lp.player_id for lp in body.players}
+    to_delete = (
+        db.query(DailyLineup)
+        .filter(
+            DailyLineup.user_id == current_user.id,
+            DailyLineup.day == body.day,
+            DailyLineup.locked == False,
+            ~DailyLineup.player_id.in_(new_player_ids),
+        )
+        .all()
+    )
+    for entry in to_delete:
+        db.delete(entry)
 
     # Upsert lineup entries
     for lp in body.players:
