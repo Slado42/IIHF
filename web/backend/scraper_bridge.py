@@ -9,7 +9,7 @@ Usage (CLI):
 import sys
 import os
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 # Add the root IIHF directory to sys.path so scraper modules are importable
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -89,30 +89,18 @@ def import_matches_to_db():
 
     df = pd.read_csv(csv_path)
     db = SessionLocal()
-    # Shift all match dates forward so the tournament maps onto the current calendar.
-    # 72 days: Dec 26, 2025 → Mar 8, 2026 (treat today as tournament Day 1).
-    DATE_SHIFT_DAYS = 72
     try:
-        year = datetime.now().year
         for _, row in df.iterrows():
             existing = db.query(Match).filter(
                 Match.home_team == row["home_team"],
                 Match.away_team == row["away_team"],
                 Match.day == row["Day"],
             ).first()
-            # Parse date and time.
-            # For cross-year tournaments: months Oct–Dec belong to year-1.
+            # Parse date and time. WM 2026 runs entirely in May 2026.
             try:
-                month_num = datetime.strptime(row["date"].split()[-1], "%b").month
-                row_year = year - 1 if month_num >= 10 else year
                 match_dt = datetime.strptime(
-                    f"{row['date']} {row['time']} {row_year}", "%d %b %H:%M %Y"
+                    f"{row['date']} {row['time']} 2026", "%d %b %H:%M %Y"
                 )
-                match_dt += timedelta(days=DATE_SHIFT_DAYS)
-                # Convert from local machine timezone to UTC so the backend
-                # (which runs in UTC on Render) compares times correctly.
-                local_utc_offset = datetime.now().astimezone().utcoffset()
-                match_dt -= local_utc_offset
             except Exception:
                 match_dt = datetime.now(timezone.utc).replace(tzinfo=None)
             # Map IIHF phase to stage: PreliminaryRound → group, else playoff
