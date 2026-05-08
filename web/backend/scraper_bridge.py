@@ -10,6 +10,7 @@ import sys
 import os
 from pathlib import Path
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 # Add the root IIHF directory to sys.path so scraper modules are importable
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -96,10 +97,17 @@ def import_matches_to_db():
                 Match.away_team == row["away_team"],
                 Match.day == row["Day"],
             ).first()
-            # Parse date and time. WM 2026 runs entirely in May 2026.
+            # Parse local Prague time and convert to UTC for storage.
+            # Displayed times are CEST/CET (Europe/Prague); zoneinfo handles DST.
             try:
-                match_dt = datetime.strptime(
+                match_dt_local = datetime.strptime(
                     f"{row['date']} {row['time']} 2026", "%d %b %H:%M %Y"
+                )
+                match_dt = (
+                    match_dt_local
+                    .replace(tzinfo=ZoneInfo('Europe/Prague'))
+                    .astimezone(timezone.utc)
+                    .replace(tzinfo=None)
                 )
             except Exception:
                 match_dt = datetime.now(timezone.utc).replace(tzinfo=None)

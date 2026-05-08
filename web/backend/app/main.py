@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base, SessionLocal
 from .models import Match
-from .routers import auth, players, matches, lineup, scores
+from .routers import auth, players, matches, lineup, scores, admin
 
 # Make web/backend/ importable so scraper_bridge can be imported
 _backend_dir = str(Path(__file__).resolve().parent.parent)
@@ -31,6 +31,7 @@ app.include_router(players.router)
 app.include_router(matches.router)
 app.include_router(lineup.router)
 app.include_router(scores.router)
+app.include_router(admin.router)
 
 
 async def _auto_score_loop():
