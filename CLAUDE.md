@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-This is a fantasy hockey app for the annual IIHF World Championship. Players pick a daily lineup of 8 (6 skaters + 1 captain + 1 goalie); fantasy points are calculated from real match stats scraped from iihf.com.
+This is a fantasy hockey app for the annual IIHF World Championship. Players pick a daily lineup of 6 (5 skaters + 1 goalie) and one of them as captain; fantasy points are calculated from real match stats scraped from iihf.com.
 
 ### Data pipeline
 
