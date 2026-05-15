@@ -22,20 +22,10 @@ from app.models import Player, Match, PlayerStat
 
 def import_players_to_db():
     """Scrape team rosters and write to the players table."""
-    from lineups_scraper import get_teams_df, extract_players_from_team_page
+    from lineups_scraper import fetch_all_players
     import pandas as pd
 
-    # Call individual scraper functions to avoid the Google Sheets upload dependency
-    df_teams = get_teams_df()
-    all_players = []
-    for _, team_row in df_teams.iterrows():
-        print(f"Scraping {team_row['country_name']} ({team_row['team_abbr']})...")
-        players = extract_players_from_team_page(
-            team_row["team_url"], team_row["country"], team_row["team_abbr"]
-        )
-        all_players.extend(players)
-        print(f"  Found {len(players)} players")
-    df = pd.DataFrame(all_players)
+    df = pd.DataFrame(fetch_all_players())
 
     db = SessionLocal()
     try:

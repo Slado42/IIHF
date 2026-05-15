@@ -170,9 +170,8 @@ def upload_to_spreadsheets(df):
             print(f"  Error uploading to {owner_name}'s spreadsheet: {str(e)}")
 
 
-def scrape_and_process():
-    print("Fetching team data and player rosters from IIHF website...")
-
+def fetch_all_players() -> list:
+    """Scrape all team rosters in a single browser session. No DB or Sheets side-effects."""
     all_players = []
     with Stealth().use_sync(sync_playwright()) as p:
         browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
@@ -182,15 +181,20 @@ def scrape_and_process():
             teams_html = _get_html(page, f'{CHAMPIONSHIP_URL}/teams', 'a.s-country-title')
             df_teams = _parse_teams_from_html(teams_html)
             print(f"Found {len(df_teams)} teams")
-
             for _, row in df_teams.iterrows():
                 print(f"Scraping players from {row['country_name']} ({row['team_abbr']})...")
                 html = _get_html(page, row['team_url'], '.s-players, .s-table', timeout=15000)
                 players = _parse_players_from_html(html, row['country'], row['team_abbr'])
                 all_players.extend(players)
-                print(f"  Added {len(players)} players")
+                print(f"  {row['team_abbr']}: {len(players)} players")
         finally:
             browser.close()
+    return all_players
+
+
+def scrape_and_process():
+    print("Fetching team data and player rosters from IIHF website...")
+    all_players = fetch_all_players()
 
     df_players = pd.DataFrame(all_players)
     df_players = df_players[~(

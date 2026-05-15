@@ -87,6 +87,39 @@ async def _auto_score_loop():
         await asyncio.sleep(3600)  # run every hour
 
 
+async def _auto_lineup_loop():
+    """Hourly task: refresh player rosters when a match is starting within 2 hours."""
+    last_scraped: datetime | None = None
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                next_match = (
+                    db.query(Match)
+                    .filter(Match.match_time >= now)
+                    .order_by(Match.match_time)
+                    .first()
+                )
+            finally:
+                db.close()
+
+            should_scrape = (
+                next_match is not None
+                and next_match.match_time - now <= timedelta(hours=2)
+                and (last_scraped is None or now - last_scraped >= timedelta(hours=12))
+            )
+            if should_scrape:
+                print("[auto-lineup] Refreshing player rosters before upcoming match...", flush=True)
+                from scraper_bridge import import_players_to_db
+                await asyncio.to_thread(import_players_to_db)
+                last_scraped = datetime.now(timezone.utc).replace(tzinfo=None)
+                print("[auto-lineup] Roster refresh complete.", flush=True)
+        except Exception as e:
+            print(f"[auto-lineup] Error: {e}", flush=True)
+        await asyncio.sleep(3600)
+
+
 @app.on_event("startup")
 async def startup():
     import subprocess
@@ -96,6 +129,7 @@ async def startup():
     )
     Base.metadata.create_all(bind=engine)
     asyncio.create_task(_auto_score_loop())
+    asyncio.create_task(_auto_lineup_loop())
 
 
 @app.get("/health")
