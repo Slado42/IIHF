@@ -80,7 +80,7 @@ def _parse_teams_from_html(html):
 
 def get_teams_df():
     with Stealth().use_sync(sync_playwright()) as p:
-        browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+        browser = p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
         page = browser.new_page(user_agent=UA)
         try:
             page.goto(CHAMPIONSHIP_URL, timeout=30000)
@@ -93,7 +93,7 @@ def get_teams_df():
 def extract_players_from_team_page(team_url, country_code, team_abbr):
     """Scrape one team roster. Opens its own browser — for single-team use only."""
     with Stealth().use_sync(sync_playwright()) as p:
-        browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+        browser = p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
         page = browser.new_page(user_agent=UA)
         try:
             page.goto(CHAMPIONSHIP_URL, timeout=30000)
@@ -181,23 +181,42 @@ def upload_to_spreadsheets(df):
             print(f"  Error uploading to {owner_name}'s spreadsheet: {str(e)}")
 
 
+CHROMIUM_ARGS = [
+    '--disable-blink-features=AutomationControlled',
+    '--disable-dev-shm-usage',   # use /tmp instead of /dev/shm (critical in containers)
+    '--no-sandbox',
+    '--disable-gpu',
+    '--disable-extensions',
+    '--disable-background-networking',
+    '--single-process',          # halves memory at the cost of stability — acceptable for scraping
+]
+
+
 def fetch_all_players() -> list:
     """Scrape all team rosters in a single browser session. No DB or Sheets side-effects."""
     all_players = []
     with Stealth().use_sync(sync_playwright()) as p:
-        browser = p.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
-        page = browser.new_page(user_agent=UA)
+        browser = p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
         try:
-            page.goto(CHAMPIONSHIP_URL, timeout=30000)
+            # Get teams list
+            page = browser.new_page(user_agent=UA)
+            page.goto(CHAMPIONSHIP_URL, timeout=60000)
             teams_html = _get_html(page, f'{CHAMPIONSHIP_URL}/teams', 'a.s-country-title')
             df_teams = _parse_teams_from_html(teams_html)
+            page.close()
             print(f"Found {len(df_teams)} teams")
+
+            # Scrape each team on a fresh page to release DOM memory between requests
             for _, row in df_teams.iterrows():
                 print(f"Scraping players from {row['country_name']} ({row['team_abbr']})...")
-                html = _get_html(page, row['team_url'], '.s-players, .s-table', timeout=15000)
-                players = _parse_players_from_html(html, row['country'], row['team_abbr'])
-                all_players.extend(players)
-                print(f"  {row['team_abbr']}: {len(players)} players")
+                page = browser.new_page(user_agent=UA)
+                try:
+                    html = _get_html(page, row['team_url'], '.s-players, .s-table', timeout=15000)
+                    players = _parse_players_from_html(html, row['country'], row['team_abbr'])
+                    all_players.extend(players)
+                    print(f"  {row['team_abbr']}: {len(players)} players")
+                finally:
+                    page.close()
                 time.sleep(2)
         finally:
             browser.close()
