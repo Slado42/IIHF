@@ -3,8 +3,6 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from playwright_stealth import Stealth
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from config import CREDENTIALS_PATH, SHEETS_SCOPE, SPREADSHEETS, LINEUPS_SHEET, LINEUPS_CSV, CHAMPIONSHIP_URL
 
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -148,6 +146,8 @@ def _skip_name(name, position):
 
 
 def upload_to_spreadsheets(df):
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
     print(f"\nUploading data to {len(SPREADSHEETS)} spreadsheets...")
     credentials = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_PATH, SHEETS_SCOPE)
     client = gspread.authorize(credentials)
