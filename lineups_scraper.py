@@ -1,4 +1,5 @@
 import re
+import time
 import pandas as pd
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
@@ -22,13 +23,23 @@ TEAM_CORRECTIONS = {
 }
 
 
-def _get_html(page, url, wait_selector, timeout=20000):
-    page.goto(url, timeout=30000)
-    try:
-        page.wait_for_selector(wait_selector, timeout=timeout)
-    except PlaywrightTimeout:
-        pass
-    return page.content()
+def _get_html(page, url, wait_selector, timeout=20000, retries=2):
+    for attempt in range(retries + 1):
+        try:
+            page.goto(url, timeout=60000)
+            try:
+                page.wait_for_selector(wait_selector, timeout=timeout)
+            except PlaywrightTimeout:
+                pass
+            return page.content()
+        except PlaywrightTimeout:
+            if attempt < retries:
+                print(f"  Timeout on {url}, retrying ({attempt + 1}/{retries})...")
+                time.sleep(3)
+                page.goto(CHAMPIONSHIP_URL, timeout=60000)  # re-prime cookies
+            else:
+                print(f"  Failed after {retries + 1} attempts: {url}")
+                return ""
 
 
 def _parse_teams_from_html(html):
@@ -187,6 +198,7 @@ def fetch_all_players() -> list:
                 players = _parse_players_from_html(html, row['country'], row['team_abbr'])
                 all_players.extend(players)
                 print(f"  {row['team_abbr']}: {len(players)} players")
+                time.sleep(2)
         finally:
             browser.close()
     return all_players
