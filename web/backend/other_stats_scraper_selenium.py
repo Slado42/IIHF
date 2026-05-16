@@ -11,12 +11,8 @@ def extract_other_stats(url_playbyplay, url_statistics):
     with Stealth().use_sync(sync_playwright()) as p:
         browser = p.chromium.launch(headless=True, args=[
             '--disable-blink-features=AutomationControlled',
-            '--disable-dev-shm-usage',
             '--no-sandbox',
             '--disable-gpu',
-            '--disable-extensions',
-            '--disable-background-networking',
-            '--single-process',
         ])
         page = browser.new_page()
 

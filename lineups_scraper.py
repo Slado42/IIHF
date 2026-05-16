@@ -183,12 +183,8 @@ def upload_to_spreadsheets(df):
 
 CHROMIUM_ARGS = [
     '--disable-blink-features=AutomationControlled',
-    '--disable-dev-shm-usage',   # use /tmp instead of /dev/shm (critical in containers)
     '--no-sandbox',
     '--disable-gpu',
-    '--disable-extensions',
-    '--disable-background-networking',
-    '--single-process',          # halves memory at the cost of stability — acceptable for scraping
 ]
 
 
