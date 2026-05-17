@@ -23,9 +23,15 @@ def extract_other_stats(url_playbyplay, url_statistics):
             try:
                 page.wait_for_selector('.s-team--home', timeout=30000)
             except PlaywrightTimeout:
+                title = page.title()
+                if "just a moment" in title.lower():
+                    raise RuntimeError(
+                        f"Cloudflare challenge on stats page (title: {title!r}) — "
+                        f"URL: {page.url}"
+                    )
                 print(f"Warning: .s-team--home not found on stats page after 30s")
                 print(f"  URL: {page.url}")
-                print(f"  Title: {page.title()}")
+                print(f"  Title: {title}")
                 print(f"  HTML (first 1000): {page.content()[:1000]}")
             stats_html = page.content()
 

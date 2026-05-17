@@ -66,6 +66,8 @@ async def _auto_score_loop():
                     await asyncio.to_thread(import_match_stats_to_db, match_id)
                 except Exception as e:
                     print(f"[auto-score] Failed to scrape match {match_id}: {e}", flush=True)
+                if len(match_ids) > 1:
+                    await asyncio.sleep(45)
 
             # Phase 3: recalculate scores in a fresh session
             db = SessionLocal()
