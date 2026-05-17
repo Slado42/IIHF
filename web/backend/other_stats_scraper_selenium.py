@@ -23,19 +23,20 @@ def extract_other_stats(url_playbyplay, url_statistics):
         page = browser.new_page(user_agent=_UA)
 
         try:
-            # Prime cookies by visiting the championship homepage first,
-            # matching the pattern used in lineups_scraper._get_html.
-            page.goto(base_url, timeout=60000)
+            # Prime cookies by visiting the championship homepage first.
+            # domcontentloaded fires before CF challenge JS completes, avoiding
+            # indefinite hangs on the Cloudflare JS challenge network requests.
+            page.goto(base_url, timeout=60000, wait_until="domcontentloaded")
 
             # Load the statistics page with one retry + cookie re-prime on timeout.
             for attempt in range(2):
                 try:
-                    page.goto(url_statistics, timeout=60000)
+                    page.goto(url_statistics, timeout=60000, wait_until="domcontentloaded")
                     break
                 except PlaywrightTimeout:
                     if attempt == 0:
                         print(f"  Stats page goto timed out, re-priming cookies and retrying...")
-                        page.goto(base_url, timeout=60000)
+                        page.goto(base_url, timeout=60000, wait_until="domcontentloaded")
                     else:
                         raise
 
@@ -55,7 +56,7 @@ def extract_other_stats(url_playbyplay, url_statistics):
             stats_html = page.content()
 
             # Load the play-by-play page for goal event data
-            page.goto(url_playbyplay, timeout=60000)
+            page.goto(url_playbyplay, timeout=60000, wait_until="domcontentloaded")
 
             match_score_home = 0
             match_score_away = 0
