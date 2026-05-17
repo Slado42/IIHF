@@ -6,20 +6,39 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from playwright_stealth import Stealth
 from game_winning_goals import extract_gwg
 
+_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
 
 def extract_other_stats(url_playbyplay, url_statistics):
+    # Derive championship base URL (e.g. https://www.iihf.com/en/events/2026/wm)
+    # for cookie priming before hitting the gamecenter pages.
+    base_url = url_statistics.split('/gamecenter/')[0]
+
     with Stealth().use_sync(sync_playwright()) as p:
         browser = p.chromium.launch(headless=True, args=[
             '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
             '--disable-gpu',
         ])
-        page = browser.new_page()
+        page = browser.new_page(user_agent=_UA)
 
         try:
-            # Load the statistics page and capture its HTML for BeautifulSoup parsing.
-            # Playwright uses its own bundled Chromium — no system Chrome needed.
-            page.goto(url_statistics, timeout=30000)
+            # Prime cookies by visiting the championship homepage first,
+            # matching the pattern used in lineups_scraper._get_html.
+            page.goto(base_url, timeout=60000)
+
+            # Load the statistics page with one retry + cookie re-prime on timeout.
+            for attempt in range(2):
+                try:
+                    page.goto(url_statistics, timeout=60000)
+                    break
+                except PlaywrightTimeout:
+                    if attempt == 0:
+                        print(f"  Stats page goto timed out, re-priming cookies and retrying...")
+                        page.goto(base_url, timeout=60000)
+                    else:
+                        raise
+
             try:
                 page.wait_for_selector('.s-team--home', timeout=30000)
             except PlaywrightTimeout:
@@ -36,7 +55,7 @@ def extract_other_stats(url_playbyplay, url_statistics):
             stats_html = page.content()
 
             # Load the play-by-play page for goal event data
-            page.goto(url_playbyplay, timeout=30000)
+            page.goto(url_playbyplay, timeout=60000)
 
             match_score_home = 0
             match_score_away = 0
