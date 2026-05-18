@@ -112,14 +112,17 @@ def _build_jersey_map(text: str, home_team: str = '', away_team: str = '') -> di
         if current_team is None:
             continue
 
-        # "Total N" marks end of one team's stats block — used as team boundary
-        # when the explicit "Team : XXX (Color)" header is absent or garbled.
-        if re.match(r"^Total\s+\d", stripped):
+        # "Total N" or bare "Total" marks end of one team's stats block — used as team
+        # boundary when the explicit "Team : XXX (Color)" header is absent or garbled.
+        # A bare "Total" (no stats) can appear when a page break splits the stat table.
+        if re.match(r"^Total\s*(\d|$)", stripped):
             after_total = True
             continue
 
         # Player rows: "16 F BARKOV Aleksander", "41D HEINOLA Ville", "12 D — STIPSICZ Bence"
-        player_m = re.match(r"^\s*(\d+)\s*([FD]|GK)\s+[—–_\-]?\s*([A-Z]{2,}(?:\s+[A-Z]{2,})*\s+\w+)", line)
+        # Position may be doubled by OCR (FF→F, DD→D). Last name may contain a hyphen or apostrophe
+        # (EKMAN-LARSSON, O'REILLY).
+        player_m = re.match(r"^\s*(\d+)\s*[—–_\-]?\s*([FD]{1,2}|GK)\s+[—–_\-]?\s*([A-Z][A-Z']*(?:-[A-Z][A-Z']*)*(?:\s+[A-Z][A-Z']*(?:-[A-Z][A-Z']*)*)*\s+\w+)", line)
         if player_m:
             if after_total and home_team and away_team:
                 current_team = away_team if current_team == home_team else home_team
@@ -162,11 +165,13 @@ def _parse_roster(text: str, home_team: str = '', away_team: str = '') -> list[d
         if current_team is None:
             continue
 
-        if re.match(r"^Total\s+\d", stripped):
+        if re.match(r"^Total\s*(\d|$)", stripped):
             after_total = True
             continue
 
-        player_m = re.match(r"^\s*(\d+)\s*([FD]|GK)\s+[—–_\-]?\s*([A-Z]{2,}(?:\s+[A-Z]{2,})*\s+\w+)", line)
+        # Position may be doubled by OCR (FF→F, DD→D). Last name may contain a hyphen or apostrophe
+        # (EKMAN-LARSSON, O'REILLY).
+        player_m = re.match(r"^\s*(\d+)\s*[—–_\-]?\s*([FD]{1,2}|GK)\s+[—–_\-]?\s*([A-Z][A-Z']*(?:-[A-Z][A-Z']*)*(?:\s+[A-Z][A-Z']*(?:-[A-Z][A-Z']*)*)*\s+\w+)", line)
         if not player_m:
             continue
 
@@ -176,26 +181,27 @@ def _parse_roster(text: str, home_team: str = '', away_team: str = '') -> list[d
 
         pos_code = player_m.group(2)
         name_raw = re.sub(r"\s*\+[CA]$", "", player_m.group(3)).strip()
-        pos_map = {"F": "Forward", "D": "Defender", "GK": "Goalkeeper"}
+        pos_map = {"F": "Forward", "D": "Defender", "GK": "Goalkeeper", "FF": "Forward", "DD": "Defender"}
 
         # +/- is the value immediately before the TOI columns (HH:MM ... HH:MM N H:MM)
         # Lookbehind (?<![:\d]) prevents matching "32" from the middle of "3:32".
         # Some PDFs have 5 TOI columns (P1 P2 P3 OT TOT) when OT column is shown;
-        # others have 4 (P1 P2 P3 TOT). Try 5-column form first, then 4, then 3.
+        # others have 4 (P1 P2 P3 TOT); some OCR rows show only 3 (P1 P2 P3) then SHF AVG.
+        # Optional "." after time values handles OCR noise like "13:33." in some scans.
         pm = 0
         pm_m = re.search(
-            r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+\s+\d+:\d+\s*$",
+            r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
             line.strip(),
         )
         if not pm_m:
             pm_m = re.search(
-                r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+\s+\d+:\d+\s*$",
+                r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
                 line.strip(),
             )
         if not pm_m:
-            # Truncated row: +/- precedes 3 per-period TOI columns only
+            # 3 per-period TOI columns + SHF + AVG (no TOT column in OCR output)
             pm_m = re.search(
-                r"(?<![:\d])(-?\d+)\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s*$",
+                r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
                 line.strip(),
             )
         if pm_m:
@@ -230,12 +236,25 @@ def _parse_goals(text: str, jersey_map: dict[str, dict[int, str]]) -> list[dict]
 
     # Match blocks: "Goal HH:MM N:N TEAM TYPE ..." up to next Goal/Penalty/GK
     # Use DOTALL so we capture multi-line blocks (wrap-around assistants)
-    blocks = re.split(r"(?=Goal\s+\d+:\d+)", text)
+    #
+    # Regex is intentionally permissive to handle several PDF format variants:
+    #   - Full format:  "Goal 08:33 1:0 FIN PP1 15 LUNDELL A (1) 86 TERAVAINEN T OnIce ..."
+    #   - No goal-count: "Goal 02:03 0:1 SUI EQ 44 SUTERP"  (no (N) after scorer name)
+    #   - No scorer:    "Goal 30:10 1:0 SUI EQ"  (low-detail PDFs omit jersey/name entirely)
+    #   - OCR _ noise:  "Goal 54:13 1:4 SVK _ PP1"  (underscore before goal type)
+    #   - Apostrophe:   "Goal 16:00 2:0 CAN EQ 90 O'REILLYR (1) ..."
+    blocks = re.split(r"(?=Goal\s+\d+:\d+)", text)  # period after clock handled in match regex
 
     for block in blocks:
         m = re.match(
-            r"Goal\s+\d+:\d+\s+(\d+):(\d+)\s+([A-Z]{3})\s+(\w+)\s+"
-            r"(\d+)\s+([A-Z][A-Z0-9]+(?:\s+[A-Z])?)\s*\(\d+\)(.*)",
+            r"Goal\s+\d+:\d+\.?\s+"                                 # game clock; optional trailing period (OCR noise)
+            r"(\d+):(\d+)\s+"                                        # g1=home, g2=away score
+            r"([A-Z]{3})\s+"                                         # g3=team
+            r"(?:[_\s]*)"                                            # optional OCR noise (e.g. _ before type)
+            r"(\w+)"                                                  # g4=goal type (EQ, PP1, SH1, ...)
+            r"(?:\s+(\d+)\s+([A-Z][A-Z0-9'\-]+(?:[ \t]+[A-Z])?)"     # g5=jersey, g6=scorer name (optional; no newline before initial)
+            r"\s*(?:\(\d+\))?)?"                                     # optional (goal_count)
+            r"(.*)",                                                  # g7=rest (assists, on-ice, etc.)
             block,
             re.DOTALL,
         )
@@ -246,11 +265,11 @@ def _parse_goals(text: str, jersey_map: dict[str, dict[int, str]]) -> list[dict]
         away_score = int(m.group(2))
         team = m.group(3)
         goal_type = m.group(4).upper()
-        scorer_jersey = int(m.group(5))
+        scorer_jersey = int(m.group(5)) if m.group(5) else None
         rest = m.group(7)
 
         team_map = jersey_map.get(team, {})
-        scorer = team_map.get(scorer_jersey, "")
+        scorer = team_map.get(scorer_jersey, "") if scorer_jersey is not None else ""
 
         # Split on the on-ice marker. Everything before it holds assist info;
         # post-onice text holds on-ice player jersey lists for both teams.
@@ -258,9 +277,17 @@ def _parse_goals(text: str, jersey_map: dict[str, dict[int, str]]) -> list[dict]
         pre_onice = onice_parts[0]
         post_onice = onice_parts[1] if len(onice_parts) > 1 else ""
 
+        # Truncate pre_onice at the first action line (Penalty/GK/Period header).
+        # In low-detail PDFs the rest block continues into the next period's events,
+        # causing penalty jersey numbers to be mistakenly picked up as assists.
+        action_m = re.search(r"(?:^|\n)(?:Penalty|GK|\d(?:st|nd|rd)\s+Period|Overtime)", pre_onice)
+        if action_m:
+            pre_onice = pre_onice[: action_m.start()]
+
         # Collect jersey+name pairs from the pre-onice section.
         # Format: "86 TERAVAINEN T" or on the next line "16 BARKOV A"
-        assist_entries = re.findall(r"(\d+)\s+([A-Z][A-Z]+(?:\s+[A-Z])?)", pre_onice)
+        # Allow hyphens in last name (e.g. "23 EKMAN-LARSSON O").
+        assist_entries = re.findall(r"(\d+)\s+([A-Z][A-Z0-9\-]+(?:\s+[A-Z])?)", pre_onice)
 
         # PDF layout has two assist columns side-by-side. OCR sometimes renders the
         # second assist on the line after the on-ice jersey blob rather than before
@@ -270,7 +297,7 @@ def _parse_goals(text: str, jersey_map: dict[str, dict[int, str]]) -> list[dict]
         # Pattern: optional special tag (e.g. "ENG"), then JERSEY NAME, then TEAM_CODE.
         if len(assist_entries) < 2:
             post_assist_m = re.search(
-                r"(?:^|\n)\s*(?:[A-Z]{2,3}\s+)?(\d+)\s+([A-Z][A-Z]+(?:\s+[A-Z])?)\s+[A-Z]{3}\s",
+                r"(?:^|\n)\s*(?:[A-Z]{2,3}\s+)?(\d+)\s+([A-Z][A-Z0-9\-]+(?:\s+[A-Z])?)\s+[A-Z]{3}\s",
                 post_onice,
             )
             if post_assist_m:
