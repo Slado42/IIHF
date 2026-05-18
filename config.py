@@ -11,6 +11,10 @@ import os
 #   2026 World Championship:    https://www.iihf.com/en/events/2026/wm
 CHAMPIONSHIP_URL = "https://www.iihf.com/en/events/2026/wm"
 
+# IIHF stats portal (no Cloudflare) — tournament ID changes each year
+STATS_TOURNAMENT_ID = "969"
+STATS_BASE_URL = f"https://stats.iihf.com/hydra/{STATS_TOURNAMENT_ID}"
+
 # Credentials path
 CREDENTIALS_PATH = "/Users/david.sladek/Documents/repos/playground/IIHF/credentials/iihf-449710-b400daf9886d.json"
 

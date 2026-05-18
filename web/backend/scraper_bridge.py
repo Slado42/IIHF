@@ -140,7 +140,7 @@ def import_match_stats_to_db(match_id: int):
             print(f"Match {match_id} has no statistics URL")
             return
 
-        df = extract_all_stats(match.url_playbyplay, match.url_statistics)
+        df = extract_all_stats(match.url_playbyplay, match.url_statistics, match.home_team, match.away_team)
         year = datetime.now().year
 
         imported_count = 0

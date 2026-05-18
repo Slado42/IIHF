@@ -12,3 +12,5 @@ beautifulsoup4>=4.12.0
 playwright>=1.40.0
 playwright-stealth>=2.0.0
 pandas>=2.0.0
+pdf2image>=1.17.0
+pytesseract>=0.3.10
