@@ -297,14 +297,17 @@ def _calc_gwg(events: list[dict], home_abbr: str, final_home: int, final_away: i
 
 def _parse_goalie_records(text: str) -> dict[str, tuple[int, int]]:
     """
-    Parse the Goalkeeper Records section.
+    Parse all Goalkeeper Records sections (may be split across teams in the PDF).
     Returns {name_raw: (sog, svs)}.
     """
     goalies: dict[str, tuple[int, int]] = {}
-    gk_m = re.search(r"Goalkeeper Records(.*?)(?:Game Statistics|$)", text, re.DOTALL)
-    if not gk_m:
+    gk_start = re.search(r"Goalkeeper Records", text)
+    if not gk_start:
         return goalies
-    for m in re.finditer(r"\d+\s+([A-Z][A-Z]+\s+\w+)\s+(\d+)\s+(\d+)\s+\d+:\d+", gk_m.group(1)):
+    # Search from the first Goalkeeper Records marker to end of text.
+    # GK rows in the Game Statistics section have no time format, so the
+    # pattern \d+:\d+ is specific enough to avoid false positives there.
+    for m in re.finditer(r"\d+\s+([A-Z][A-Z]+\s+\w+)\s+(\d+)\s+(\d+)\s+\d+:\d+", text[gk_start.start():]):
         name = m.group(1).strip()
         goalies[name] = (int(m.group(2)), int(m.group(3)))  # (sog, svs)
     return goalies
