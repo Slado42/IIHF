@@ -23,7 +23,7 @@ def _ocr_pdf(pdf_bytes: bytes) -> str:
     """Convert PDF pages to images and OCR. Lazy import so startup isn't blocked."""
     from pdf2image import convert_from_bytes
     import pytesseract
-    images = convert_from_bytes(pdf_bytes, dpi=200)
+    images = convert_from_bytes(pdf_bytes, dpi=300)
     return "\n".join(pytesseract.image_to_string(img) for img in images)
 
 
