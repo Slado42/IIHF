@@ -123,13 +123,17 @@ def _build_user_day_scores(user_id: str, db: Session) -> list[UserDayScoreOut]:
                 )
                 .first()
             )
+            # Recompute per-user so captain multiplier is applied correctly.
+            # stat.fantasy_points is shared across users and reflects the last
+            # user processed, so we can't use it for per-player display.
+            player_pts = calculate_player_points(stat, entry.player.position, entry.is_captain) if stat else 0.0
             player_details.append(PlayerScoreDetail(
                 player_id=entry.player_id,
                 name=entry.player.name,
                 team_abbr=entry.player.team_abbr,
                 position=entry.player.position,
                 is_captain=entry.is_captain,
-                fantasy_points=stat.fantasy_points if stat else 0.0,
+                fantasy_points=player_pts,
                 goals=stat.goals if stat else None,
                 assists=stat.assists if stat else None,
                 ppg=stat.ppg if stat else None,
