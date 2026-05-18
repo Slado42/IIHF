@@ -2,13 +2,11 @@
 PDF-based IIHF game stats scraper using stats.iihf.com (no Cloudflare protection).
 
 Replaces the Playwright/iihf.com approach. Fetches the Game Summary PDF
-(report type 74) for each match, OCRs it with Tesseract, and parses sections:
-  - Goals table  → goals, assists, PPG, SHG, GWG
-  - Penalties    → PIM
-  - Player stats → full roster + +/-
-  - Goalie stats → saves, goals against
+(report type 74) for each match, OCRs it with Tesseract, and parses:
+  - Game Statistics section  → G, A, PIM, +/- per player (direct table read)
+  - Goals section            → PPG, SHG, GWG (goal type + scorer only)
+  - Goalkeeper Records       → saves, goals against
 """
-import io
 import re
 import sys
 from pathlib import Path
@@ -33,16 +31,11 @@ def get_game_pdf_url(home_team: str, away_team: str) -> str:
     """
     Fetch the tournament schedule HTML and return the Game Summary (_74_) PDF URL
     for the game where home_team plays away_team.
-
-    Finds the _74_ href whose position in the raw HTML is closest to the matchup
-    string (e.g. "FIN - GER"), avoiding dependency on the page's DOM structure.
     """
     resp = requests.get(f"{STATS_BASE_URL}/index.html", timeout=30)
     resp.raise_for_status()
     html = resp.text
 
-    # Home team is in an align="right" bold cell; away team follows after a "-" cell.
-    # Limit span to 150 chars to match within a single row and avoid standings tables.
     matchup_m = re.search(
         rf'align="right"><b>{re.escape(home_team)}</b>&nbsp;</td>.{{0,150}}&nbsp;<b>{re.escape(away_team)}</b>',
         html,
@@ -58,7 +51,6 @@ def get_game_pdf_url(home_team: str, away_team: str) -> str:
     if not pdf_links:
         raise ValueError("No _74_ PDF links found in schedule HTML")
 
-    # The PDF link appears after the team names in the same row; take the first one after the match.
     after = [(pos, h) for pos, h in pdf_links if pos > matchup_m.end()]
     if not after:
         raise ValueError(f"No _74_ PDF found after matchup '{home_team} vs {away_team}' in HTML")
@@ -76,23 +68,92 @@ def _parse_score(text: str) -> tuple[str, str, int, int]:
     return m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
 
 
-# ── Roster (jersey map + full player list) ──────────────────────────────────
+# ── Game Statistics section ──────────────────────────────────────────────────
 
-def _build_jersey_map(text: str, home_team: str = '', away_team: str = '') -> dict[str, dict[int, str]]:
+# Player line regex: handles hyphenated names (EKMAN-LARSSON), apostrophes (O'REILLY),
+# doubled position codes from OCR (FF→F, DD→D), and leading dash/dash noise.
+_PLAYER_RE = re.compile(
+    r"^\s*(\d+)\s*[—–_\-]?\s*([FD]{1,2}|GK)\s+[—–_\-]?\s*"
+    r"([A-Z][A-Z']*(?:-[A-Z][A-Z']*)*(?:\s+[A-Z][A-Z']*(?:-[A-Z][A-Z']*)*)*\s+\w+)"
+)
+
+
+def _extract_gap_pim(rest: str) -> tuple[int, int, int, int]:
     """
-    Parse the Game Statistics section to build a per-team jersey-number → name_raw map.
-    Used to resolve scorer/assist jersey numbers from the goals table.
+    Extract G, A, P, PIM from the stats area immediately after the player name.
 
-    Returns {team_abbr: {jersey_no: name_raw}}
+    OCR always merges G A P into the first whitespace-delimited token:
+      '112' = 1G 1A 2P,  '000' = 0G 0A 0P,  '0o1%1' = 0G 1A 1P (noise between digits).
+    Occasionally OCR splits G from AP ('0 00' = 0G 0A 0P) — handled by collecting
+    digits across tokens until we have 3.
+    PIM is the first token after the token(s) that provided all 3 GAP digits.
+    """
+    area = re.sub(r'\s*\+[CA]\b|\s*\([A-Z]+\)', '', rest).lstrip()
+    tokens = area.split()
+
+    # Collect digits from the first few tokens (usually just 1 token: e.g. '112' or '01141')
+    gap_digits: list[int] = []
+    pim_token_idx: int | None = None
+
+    for i, tok in enumerate(tokens[:5]):
+        tok_digits = [int(c) for c in re.findall(r'\d', tok[:8])]
+        gap_digits.extend(tok_digits)
+        if len(gap_digits) >= 3:
+            pim_token_idx = i + 1
+            break
+
+    if len(gap_digits) < 3 or pim_token_idx is None:
+        return 0, 0, 0, 0
+
+    # Find the first ordered triple (d[i], d[j], d[k]) where d[i]+d[j]==d[k].
+    # OCR sometimes inserts digit noise into the GAP string (e.g. '0411' for 0G 1A 1P);
+    # the triplet search recovers the correct values even when digits aren't consecutive.
+    g = a = p = None
+    n = min(len(gap_digits), 6)
+    for i in range(n):
+        for j in range(i + 1, n):
+            for k in range(j + 1, n):
+                if gap_digits[i] + gap_digits[j] == gap_digits[k]:
+                    g, a, p = gap_digits[i], gap_digits[j], gap_digits[k]
+                    break
+            if g is not None:
+                break
+        if g is not None:
+            break
+
+    if g is None:
+        return 0, 0, 0, 0
+
+    pim = 0
+    if pim_token_idx < len(tokens):
+        pim_digits = re.sub(r'[^\d]', '', tokens[pim_token_idx])
+        pim = int(pim_digits) if pim_digits else 0
+
+    return g, a, p, pim
+
+
+def _parse_game_statistics(
+    text: str, home_team: str = '', away_team: str = ''
+) -> tuple[dict[str, dict[int, str]], list[dict]]:
+    """
+    Single pass through the Game Statistics section.
+
+    Returns:
+      jersey_map  — {team_abbr: {jersey_no: name_raw}}  (for PPG/SHG/GWG attribution)
+      players     — [{name_raw, team, pos, goals, assists, pim, plus_minus}]
     """
     jersey_map: dict[str, dict[int, str]] = {}
+    players: list[dict] = []
     current_team: str | None = None
     after_total = False
+
+    pos_map = {"F": "Forward", "D": "Defender", "GK": "Goalkeeper",
+               "FF": "Forward", "DD": "Defender"}
 
     for line in text.split("\n"):
         stripped = line.strip()
 
-        # Game Statistics explicit header: "Team : SUI (Red)" — always update.
+        # Game Statistics explicit header: "Team : SUI (Red)" — always update team.
         explicit_team_m = re.match(r"Team\s*:\s*([A-Z]{3})\s*\(", stripped)
         if explicit_team_m:
             current_team = explicit_team_m.group(1)
@@ -101,8 +162,7 @@ def _build_jersey_map(text: str, home_team: str = '', away_team: str = '') -> di
             continue
 
         # Goalkeeper Records header: "Team : SUI - Switzerland" — only initialise
-        # if we haven't seen a team yet; prevents this line from overriding once
-        # Game Statistics player rows have already started under the correct team.
+        # if we haven't seen a Game Statistics team header yet.
         gk_team_m = re.match(r"Team\s*:\s*([A-Z]{3})", stripped)
         if gk_team_m and current_team is None:
             current_team = gk_team_m.group(1)
@@ -112,260 +172,128 @@ def _build_jersey_map(text: str, home_team: str = '', away_team: str = '') -> di
         if current_team is None:
             continue
 
-        # "Total N" or bare "Total" marks end of one team's stats block — used as team
-        # boundary when the explicit "Team : XXX (Color)" header is absent or garbled.
-        # A bare "Total" (no stats) can appear when a page break splits the stat table.
+        # "Total N" or bare "Total" = end of one team's block.
         if re.match(r"^Total\s*(\d|$)", stripped):
             after_total = True
             continue
 
-        # Player rows: "16 F BARKOV Aleksander", "41D HEINOLA Ville", "12 D — STIPSICZ Bence"
-        # Position may be doubled by OCR (FF→F, DD→D). Last name may contain a hyphen or apostrophe
-        # (EKMAN-LARSSON, O'REILLY).
-        player_m = re.match(r"^\s*(\d+)\s*[—–_\-]?\s*([FD]{1,2}|GK)\s+[—–_\-]?\s*([A-Z][A-Z']*(?:-[A-Z][A-Z']*)*(?:\s+[A-Z][A-Z']*(?:-[A-Z][A-Z']*)*)*\s+\w+)", line)
-        if player_m:
-            if after_total and home_team and away_team:
-                current_team = away_team if current_team == home_team else home_team
-                jersey_map.setdefault(current_team, {})
-                after_total = False
-            jersey = int(player_m.group(1))
-            name_raw = re.sub(r"\s*\+[CA]$", "", player_m.group(3)).strip()
-            jersey_map[current_team][jersey] = name_raw
-
-    return jersey_map
-
-
-def _parse_roster(text: str, home_team: str = '', away_team: str = '') -> list[dict]:
-    """
-    Returns full list of players: [{name_raw, team, pos, plus_minus}].
-    Plus/minus is extracted from the end of each stat line:
-      pattern: (+-N) HH:MM HH:MM HH:MM HH:MM N H:MM
-    """
-    players = []
-    current_team: str | None = None
-    after_total = False
-
-    for line in text.split("\n"):
-        stripped = line.strip()
-
-        # Game Statistics explicit header: "Team : SUI (Red)" — always update.
-        explicit_team_m = re.match(r"Team\s*:\s*([A-Z]{3})\s*\(", stripped)
-        if explicit_team_m:
-            current_team = explicit_team_m.group(1)
-            after_total = False
-            continue
-
-        # Goalkeeper Records header: "Team : SUI - Switzerland" — only initialise
-        # if we haven't seen a team yet.
-        gk_team_m = re.match(r"Team\s*:\s*([A-Z]{3})", stripped)
-        if gk_team_m and current_team is None:
-            current_team = gk_team_m.group(1)
-            continue
-
-        if current_team is None:
-            continue
-
-        if re.match(r"^Total\s*(\d|$)", stripped):
-            after_total = True
-            continue
-
-        # Position may be doubled by OCR (FF→F, DD→D). Last name may contain a hyphen or apostrophe
-        # (EKMAN-LARSSON, O'REILLY).
-        player_m = re.match(r"^\s*(\d+)\s*[—–_\-]?\s*([FD]{1,2}|GK)\s+[—–_\-]?\s*([A-Z][A-Z']*(?:-[A-Z][A-Z']*)*(?:\s+[A-Z][A-Z']*(?:-[A-Z][A-Z']*)*)*\s+\w+)", line)
+        player_m = _PLAYER_RE.match(line)
         if not player_m:
             continue
 
         if after_total and home_team and away_team:
             current_team = away_team if current_team == home_team else home_team
+            jersey_map.setdefault(current_team, {})
             after_total = False
 
+        jersey = int(player_m.group(1))
         pos_code = player_m.group(2)
         name_raw = re.sub(r"\s*\+[CA]$", "", player_m.group(3)).strip()
-        pos_map = {"F": "Forward", "D": "Defender", "GK": "Goalkeeper", "FF": "Forward", "DD": "Defender"}
+        pos = pos_map.get(pos_code, "Forward")
 
-        # +/- is the value immediately before the TOI columns (HH:MM ... HH:MM N H:MM)
-        # Lookbehind (?<![:\d]) prevents matching "32" from the middle of "3:32".
-        # Some PDFs have 5 TOI columns (P1 P2 P3 OT TOT) when OT column is shown;
-        # others have 4 (P1 P2 P3 TOT); some OCR rows show only 3 (P1 P2 P3) then SHF AVG.
-        # Optional "." after time values handles OCR noise like "13:33." in some scans.
+        jersey_map[current_team][jersey] = name_raw
+
+        # Stats come right after the name match ends in the line.
+        rest = line[player_m.end():]
+
+        # Goalies don't have meaningful G/A/PIM in Game Statistics (always 0);
+        # their actual saves/GA come from Goalkeeper Records.
+        if pos == "Goalkeeper":
+            g = a = pim = 0
+        else:
+            g, a, _p, pim = _extract_gap_pim(rest)
+
+        # +/- is the value immediately before the TOI columns.
+        # Try 5-column (with OT), 4-column, and 3-column+SHF+AVG variants.
         pm = 0
-        pm_m = re.search(
+        for pattern in (
             r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
-            line.strip(),
-        )
-        if not pm_m:
-            pm_m = re.search(
-                r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
-                line.strip(),
-            )
-        if not pm_m:
-            # 3 per-period TOI columns + SHF + AVG (no TOT column in OCR output)
-            pm_m = re.search(
-                r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
-                line.strip(),
-            )
-        if pm_m:
-            try:
-                pm = int(pm_m.group(1).replace("+", ""))
-            except ValueError:
-                pm = 0
+            r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
+            r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
+        ):
+            pm_m = re.search(pattern, line.strip())
+            if pm_m:
+                try:
+                    pm = int(pm_m.group(1).replace("+", ""))
+                except ValueError:
+                    pm = 0
+                break
 
-        players.append(
-            {
-                "name_raw": name_raw,
-                "team": current_team,
-                "pos": pos_map.get(pos_code, "Forward"),
-                "plus_minus": pm,
-            }
-        )
+        players.append({
+            "name_raw": name_raw,
+            "team": current_team,
+            "pos": pos,
+            "goals": g,
+            "assists": a,
+            "pim": pim,
+            "plus_minus": pm,
+        })
 
-    return players
+    return jersey_map, players
 
 
-# ── Goals ─────────────────────────────────────────────────────────────────────
+# ── Goal types (PPG / SHG / GWG only) ────────────────────────────────────────
 
-def _parse_goals(text: str, jersey_map: dict[str, dict[int, str]]) -> list[dict]:
+def _parse_goal_types(text: str, jersey_map: dict[str, dict[int, str]]) -> list[dict]:
     """
-    Parse each goal event. Returns list of:
-      {scorer, assist1, assist2, team, is_pp, is_sh, home_score, away_score}
+    Parse goal events to determine scorer, goal type, and running score.
+    Used only for PPG/SHG flags and GWG calculation — G/A/PIM come from Game Statistics.
 
-    Scorer and assists are resolved via the jersey map. Falls back to OCR name if
-    the jersey number is not found.
+    Returns [{scorer, team, is_pp, is_sh, home_score, away_score}]
     """
     events = []
-
-    # Match blocks: "Goal HH:MM N:N TEAM TYPE ..." up to next Goal/Penalty/GK
-    # Use DOTALL so we capture multi-line blocks (wrap-around assistants)
-    #
-    # Regex is intentionally permissive to handle several PDF format variants:
-    #   - Full format:  "Goal 08:33 1:0 FIN PP1 15 LUNDELL A (1) 86 TERAVAINEN T OnIce ..."
-    #   - No goal-count: "Goal 02:03 0:1 SUI EQ 44 SUTERP"  (no (N) after scorer name)
-    #   - No scorer:    "Goal 30:10 1:0 SUI EQ"  (low-detail PDFs omit jersey/name entirely)
-    #   - OCR _ noise:  "Goal 54:13 1:4 SVK _ PP1"  (underscore before goal type)
-    #   - Apostrophe:   "Goal 16:00 2:0 CAN EQ 90 O'REILLYR (1) ..."
-    blocks = re.split(r"(?=Goal\s+\d+:\d+)", text)  # period after clock handled in match regex
+    blocks = re.split(r"(?=Goal\s+\d+:\d+)", text)
 
     for block in blocks:
         m = re.match(
-            r"Goal\s+\d+:\d+\.?\s+"                                 # game clock; optional trailing period (OCR noise)
-            r"(\d+):(\d+)\s+"                                        # g1=home, g2=away score
-            r"([A-Z]{3})\s+"                                         # g3=team
-            r"(?:[_\s]*)"                                            # optional OCR noise (e.g. _ before type)
-            r"(\w+)"                                                  # g4=goal type (EQ, PP1, SH1, ...)
-            r"(?:\s+(\d+)\s+([A-Z][A-Z0-9'\-]+(?:[ \t]+[A-Z])?)"     # g5=jersey, g6=scorer name (optional; no newline before initial)
-            r"\s*(?:\(\d+\))?)?"                                     # optional (goal_count)
-            r"(.*)",                                                  # g7=rest (assists, on-ice, etc.)
+            r"Goal\s+\d+:\d+\.?\s+"
+            r"(\d+):(\d+)\s+"                                        # home:away score
+            r"([A-Z]{3})\s+"                                         # team
+            r"(?:[_\s]*)"                                            # optional OCR noise
+            r"(\w+)"                                                  # goal type
+            r"(?:\s+(\d+)\s+([A-Z][A-Z0-9'\-]+(?:[ \t]+[A-Z])?)?"   # optional jersey + name
+            r"\s*(?:\(\d+\))?)?",                                    # optional (goal_count)
             block,
-            re.DOTALL,
         )
         if not m:
             continue
 
-        home_score = int(m.group(1))
-        away_score = int(m.group(2))
         team = m.group(3)
         goal_type = m.group(4).upper()
         scorer_jersey = int(m.group(5)) if m.group(5) else None
-        rest = m.group(7)
+        scorer = jersey_map.get(team, {}).get(scorer_jersey, "") if scorer_jersey else ""
 
-        team_map = jersey_map.get(team, {})
-        scorer = team_map.get(scorer_jersey, "") if scorer_jersey is not None else ""
-
-        # Split on the on-ice marker. Everything before it holds assist info;
-        # post-onice text holds on-ice player jersey lists for both teams.
-        onice_parts = re.split(r"On\s*[lI]?\s*[iI]?[cC][eE]", rest, maxsplit=1)
-        pre_onice = onice_parts[0]
-        post_onice = onice_parts[1] if len(onice_parts) > 1 else ""
-
-        # Truncate pre_onice at the first action line (Penalty/GK/Period header).
-        # In low-detail PDFs the rest block continues into the next period's events,
-        # causing penalty jersey numbers to be mistakenly picked up as assists.
-        action_m = re.search(r"(?:^|\n)(?:Penalty|GK|\d(?:st|nd|rd)\s+Period|Overtime)", pre_onice)
-        if action_m:
-            pre_onice = pre_onice[: action_m.start()]
-
-        # Collect jersey+name pairs from the pre-onice section.
-        # Format: "86 TERAVAINEN T" or on the next line "16 BARKOV A"
-        # Allow hyphens in last name (e.g. "23 EKMAN-LARSSON O").
-        assist_entries = re.findall(r"(\d+)\s+([A-Z][A-Z0-9\-]+(?:\s+[A-Z])?)", pre_onice)
-
-        # PDF layout has two assist columns side-by-side. OCR sometimes renders the
-        # second assist on the line after the on-ice jersey blob rather than before
-        # the "OnIce" marker. Look for a lone JERSEY LASTNAME [INITIAL] entry that
-        # appears in the post-onice section between the home team's jersey numbers
-        # and the away team's jersey numbers (identified by a 3-letter team code).
-        # Pattern: optional special tag (e.g. "ENG"), then JERSEY NAME, then TEAM_CODE.
-        if len(assist_entries) < 2:
-            post_assist_m = re.search(
-                r"(?:^|\n)\s*(?:[A-Z]{2,3}\s+)?(\d+)\s+([A-Z][A-Z0-9\-]+(?:\s+[A-Z])?)\s+[A-Z]{3}\s",
-                post_onice,
-            )
-            if post_assist_m:
-                assist_entries = assist_entries + [(post_assist_m.group(1), post_assist_m.group(2))]
-
-        assists = []
-        for jersey_str, _ocr_name in assist_entries:
-            jersey = int(jersey_str)
-            name = team_map.get(jersey, "")
-            if name and name not in assists:
-                assists.append(name)
-
-        events.append(
-            {
-                "scorer": scorer,
-                "assists": assists,
-                "team": team,
-                "is_pp": goal_type.startswith("PP"),
-                "is_sh": goal_type.startswith("SH"),
-                "home_score": home_score,
-                "away_score": away_score,
-            }
-        )
+        events.append({
+            "scorer": scorer,
+            "team": team,
+            "is_pp": goal_type.startswith("PP"),
+            "is_sh": goal_type.startswith("SH"),
+            "home_score": int(m.group(1)),
+            "away_score": int(m.group(2)),
+        })
 
     return events
 
 
+# ── GWG ───────────────────────────────────────────────────────────────────────
+
 def _calc_gwg(events: list[dict], home_abbr: str, final_home: int, final_away: int) -> str:
-    """
-    GWG: the goal that first puts the winning team at loser_final+1.
-    Returns the scorer's name_raw or '' if undetermined.
-    """
+    """GWG: first goal that puts the winning team at loser_final+1."""
     if final_home == final_away:
         return ""
     home_wins = final_home > final_away
-    gwg_threshold = (final_away if home_wins else final_home) + 1
+    threshold = (final_away if home_wins else final_home) + 1
     for ev in events:
         is_home_goal = ev["team"] == home_abbr
         if home_wins != is_home_goal:
-            continue  # goal scored by the losing team
+            continue
         running = ev["home_score"] if home_wins else ev["away_score"]
-        if running == gwg_threshold:
+        if running == threshold:
             return ev["scorer"]
     return ""
 
 
-# ── Penalties ─────────────────────────────────────────────────────────────────
-
-def _parse_penalties(text: str, jersey_map: dict[str, dict[int, str]]) -> dict[str, int]:
-    """
-    Parse penalty lines. Returns {name_raw: total_pim}.
-    Uses jersey number for lookup when available.
-    """
-    pim: dict[str, int] = {}
-    for m in re.finditer(
-        r"Penalty\s+\d+:\d+\s+\d+:\d+\s+([A-Z]{3})\s+(\d+)\s*min\.\s+(\d+)\s+([A-Z][A-Z]+)",
-        text,
-    ):
-        team = m.group(1)
-        minutes = int(m.group(2))
-        jersey = int(m.group(3))
-        name = jersey_map.get(team, {}).get(jersey, m.group(4).strip())
-        pim[name] = pim.get(name, 0) + minutes
-
-    return pim
-
-
-# ── Goalie records ────────────────────────────────────────────────────────────
+# ── Goalkeeper records ────────────────────────────────────────────────────────
 
 def _parse_goalie_records(text: str) -> dict[str, tuple[int, int]]:
     """
@@ -376,25 +304,15 @@ def _parse_goalie_records(text: str) -> dict[str, tuple[int, int]]:
     gk_m = re.search(r"Goalkeeper Records(.*?)(?:Game Statistics|$)", text, re.DOTALL)
     if not gk_m:
         return goalies
-
-    section = gk_m.group(1)
-    # Each goalie row: "31 ANNUNEN Justus 18 17 60:00"
-    for m in re.finditer(r"\d+\s+([A-Z][A-Z]+\s+\w+)\s+(\d+)\s+(\d+)\s+\d+:\d+", section):
+    for m in re.finditer(r"\d+\s+([A-Z][A-Z]+\s+\w+)\s+(\d+)\s+(\d+)\s+\d+:\d+", gk_m.group(1)):
         name = m.group(1).strip()
-        sog = int(m.group(2))
-        svs = int(m.group(3))
-        goalies[name] = (sog, svs)
-
+        goalies[name] = (int(m.group(2)), int(m.group(3)))  # (sog, svs)
     return goalies
 
 
 # ── Name normalisation ────────────────────────────────────────────────────────
 
 def _pdf_to_db_name(name_raw: str) -> str:
-    """
-    PDF names are 'LASTNAME Firstname', matching the DB format exactly.
-    Just strip OCR artefacts: captain/alternate markers (+C, +A) and award tags (BP).
-    """
     name = re.sub(r"\s*\+[CA]\s*", " ", name_raw)
     name = re.sub(r"\s*\([A-Z]+\)\s*", " ", name)
     return " ".join(name.split())
@@ -406,8 +324,7 @@ def scrape_game_stats(home_team: str, away_team: str) -> pd.DataFrame:
     """
     Fetch and parse the IIHF game summary PDF for home_team vs away_team.
 
-    Returns a DataFrame with the same column structure as the old
-    extract_all_stats() / match_stats_scraper output:
+    Returns a DataFrame with columns:
       Player, Team, Position, Goals, Assists, Points, Penalty Minutes,
       Plus Minus, Goals Against, Saves, Power Play Goal, Shorthanded Goal,
       Game Winning Goal, Win, Event
@@ -419,35 +336,25 @@ def scrape_game_stats(home_team: str, away_team: str) -> pd.DataFrame:
 
     text = _ocr_pdf(pdf_resp.content)
 
-    # Goals and penalties only appear before the Goalkeeper Records section.
-    # Truncating prevents the last goal block from bleeding into Game Statistics
-    # and picking up player-stat rows as false assists or penalty entries.
+    # Truncate goals/penalties text at Goalkeeper Records to prevent bleed-through.
     gk_pos = re.search(r"Goalkeeper Records", text)
     goals_text = text[:gk_pos.start()] if gk_pos else text
 
     home_abbr, away_abbr, home_score, away_score = _parse_score(text)
-    jersey_map = _build_jersey_map(text, home_team, away_team)
-    roster = _parse_roster(text, home_team, away_team)
-    goal_events = _parse_goals(goals_text, jersey_map)
-    penalty_pim = _parse_penalties(goals_text, jersey_map)
+    jersey_map, roster = _parse_game_statistics(text, home_team, away_team)
+    goal_events = _parse_goal_types(goals_text, jersey_map)
     goalie_records = _parse_goalie_records(text)
     gwg_scorer = _calc_gwg(goal_events, home_abbr, home_score, away_score)
 
-    # Aggregate per-player goal stats
-    goal_stats: dict[str, dict] = {}
+    # Per-scorer PPG and SHG counts from goal events.
+    ppg_counts: dict[str, int] = {}
+    shg_counts: dict[str, int] = {}
     for ev in goal_events:
-        scorer = ev["scorer"]
-        if scorer:
-            d = goal_stats.setdefault(scorer, {"goals": 0, "ppg": 0, "shg": 0, "assists": 0})
-            d["goals"] += 1
+        if ev["scorer"]:
             if ev["is_pp"]:
-                d["ppg"] += 1
+                ppg_counts[ev["scorer"]] = ppg_counts.get(ev["scorer"], 0) + 1
             if ev["is_sh"]:
-                d["shg"] += 1
-        for a in ev["assists"]:
-            if a:
-                ad = goal_stats.setdefault(a, {"goals": 0, "ppg": 0, "shg": 0, "assists": 0})
-                ad["assists"] += 1
+                shg_counts[ev["scorer"]] = shg_counts.get(ev["scorer"], 0) + 1
 
     rows = []
     for p in roster:
@@ -458,36 +365,32 @@ def scrape_game_stats(home_team: str, away_team: str) -> pd.DataFrame:
             (team == home_abbr and home_score > away_score)
             or (team == away_abbr and away_score > home_score)
         )
-        g = goal_stats.get(name_raw, {})
-        pim = penalty_pim.get(name_raw, 0)
         saves = ga = 0
         if pos == "Goalkeeper" and name_raw in goalie_records:
             sog, svs = goalie_records[name_raw]
             saves, ga = svs, sog - svs
 
-        rows.append(
-            {
-                "Player": _pdf_to_db_name(name_raw),
-                "Team": "home" if team == home_abbr else "away",
-                "Position": pos,
-                "Goals": g.get("goals", 0),
-                "Assists": g.get("assists", 0),
-                "Points": g.get("goals", 0) + g.get("assists", 0),
-                "Penalty Minutes": pim,
-                "Plus Minus": p["plus_minus"],
-                "Power Play Goal": g.get("ppg", 0),
-                "Shorthanded Goal": g.get("shg", 0),
-                "Game Winning Goal": int(bool(gwg_scorer) and name_raw == gwg_scorer),
-                "Saves": saves,
-                "Goals Against": ga,
-                "Win": win,
-                "Event": "",
-            }
-        )
+        rows.append({
+            "Player": _pdf_to_db_name(name_raw),
+            "Team": "home" if team == home_abbr else "away",
+            "Position": pos,
+            "Goals": p["goals"],
+            "Assists": p["assists"],
+            "Points": p["goals"] + p["assists"],
+            "Penalty Minutes": p["pim"],
+            "Plus Minus": p["plus_minus"],
+            "Power Play Goal": ppg_counts.get(name_raw, 0),
+            "Shorthanded Goal": shg_counts.get(name_raw, 0),
+            "Game Winning Goal": int(bool(gwg_scorer) and name_raw == gwg_scorer),
+            "Saves": saves,
+            "Goals Against": ga,
+            "Win": win,
+            "Event": "",
+        })
 
     df = pd.DataFrame(rows)
 
-    # Zero out all stats for backup goalies (0 saves = didn't play)
+    # Zero out all stats for backup goalies (0 saves = didn't play).
     gk_zero = (df["Position"] == "Goalkeeper") & (df["Saves"] == 0)
     if gk_zero.any():
         num_cols = df.select_dtypes(include="number").columns
@@ -499,6 +402,5 @@ def scrape_game_stats(home_team: str, away_team: str) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    # Quick test: FIN vs GER, Game 1
     df = scrape_game_stats("FIN", "GER")
     print(df.to_string())
