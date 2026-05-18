@@ -252,12 +252,29 @@ def _parse_goals(text: str, jersey_map: dict[str, dict[int, str]]) -> list[dict]
         team_map = jersey_map.get(team, {})
         scorer = team_map.get(scorer_jersey, "")
 
-        # Everything before the first "On[Ii]ce" / "Onlce" marker holds assist info.
-        pre_onice = re.split(r"On\s*[lI]?\s*[iI]?[cC][eE]", rest, maxsplit=1)[0]
+        # Split on the on-ice marker. Everything before it holds assist info;
+        # post-onice text holds on-ice player jersey lists for both teams.
+        onice_parts = re.split(r"On\s*[lI]?\s*[iI]?[cC][eE]", rest, maxsplit=1)
+        pre_onice = onice_parts[0]
+        post_onice = onice_parts[1] if len(onice_parts) > 1 else ""
 
         # Collect jersey+name pairs from the pre-onice section.
         # Format: "86 TERAVAINEN T" or on the next line "16 BARKOV A"
         assist_entries = re.findall(r"(\d+)\s+([A-Z][A-Z]+(?:\s+[A-Z])?)", pre_onice)
+
+        # PDF layout has two assist columns side-by-side. OCR sometimes renders the
+        # second assist on the line after the on-ice jersey blob rather than before
+        # the "OnIce" marker. Look for a lone JERSEY LASTNAME [INITIAL] entry that
+        # appears in the post-onice section between the home team's jersey numbers
+        # and the away team's jersey numbers (identified by a 3-letter team code).
+        # Pattern: optional special tag (e.g. "ENG"), then JERSEY NAME, then TEAM_CODE.
+        if len(assist_entries) < 2:
+            post_assist_m = re.search(
+                r"(?:^|\n)\s*(?:[A-Z]{2,3}\s+)?(\d+)\s+([A-Z][A-Z]+(?:\s+[A-Z])?)\s+[A-Z]{3}\s",
+                post_onice,
+            )
+            if post_assist_m:
+                assist_entries = assist_entries + [(post_assist_m.group(1), post_assist_m.group(2))]
 
         assists = []
         for jersey_str, _ocr_name in assist_entries:
