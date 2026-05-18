@@ -71,10 +71,11 @@ def _parse_score(text: str) -> tuple[str, str, int, int]:
 # ── Game Statistics section ──────────────────────────────────────────────────
 
 # Player line regex: handles hyphenated names (EKMAN-LARSSON), apostrophes (O'REILLY),
-# doubled position codes from OCR (FF→F, DD→D), and leading dash/dash noise.
+# doubled position codes from OCR (FF→F, DD→D), leading dash/dash noise, and OCR
+# noise chars (!, °, %) injected into surnames (e.g. LOHRE!I → LOHREI).
 _PLAYER_RE = re.compile(
     r"^\s*(\d+)\s*[—–_\-]?\s*([FD]{1,2}|GK)\s+[—–_\-]?\s*"
-    r"([A-Z][A-Z']*(?:-[A-Z][A-Z']*)*(?:\s+[A-Z][A-Z']*(?:-[A-Z][A-Z']*)*)*\s+\w+)"
+    r"([A-Z][A-Z'!°%]*(?:-[A-Z][A-Z'!°%]*)*(?:\s+[A-Z][A-Z'!°%]*(?:-[A-Z][A-Z'!°%]*)*)*\s+\w+)"
 )
 
 
@@ -210,6 +211,8 @@ def _parse_game_statistics(
             r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
             r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
             r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+\s+\d+:\d+\s*$",
+            # OCR sometimes renders the TOT field as bare ":" — match 3 TOI periods + ":" + SHF + AVG
+            r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\.?\s+\d+:\d+\.?\s+\d+:\d+\.?\s+:\s+\d+\s+\d+:\d+\s*$",
         ):
             pm_m = re.search(pattern, line.strip())
             if pm_m:
@@ -318,6 +321,7 @@ def _parse_goalie_records(text: str) -> dict[str, tuple[int, int]]:
 def _pdf_to_db_name(name_raw: str) -> str:
     name = re.sub(r"\s*\+[CA]\s*", " ", name_raw)
     name = re.sub(r"\s*\([A-Z]+\)\s*", " ", name)
+    name = re.sub(r"[!°%]", "", name)  # strip common OCR noise chars from surnames
     return " ".join(name.split())
 
 
