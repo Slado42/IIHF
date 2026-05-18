@@ -179,16 +179,23 @@ def _parse_roster(text: str, home_team: str = '', away_team: str = '') -> list[d
         pos_map = {"F": "Forward", "D": "Defender", "GK": "Goalkeeper"}
 
         # +/- is the value immediately before the TOI columns (HH:MM ... HH:MM N H:MM)
+        # Lookbehind (?<![:\d]) prevents matching "32" from the middle of "3:32".
+        # Some PDFs have 5 TOI columns (P1 P2 P3 OT TOT) when OT column is shown;
+        # others have 4 (P1 P2 P3 TOT). Try 5-column form first, then 4, then 3.
         pm = 0
-        # Full row: +/- precedes 4 TOI columns + shifts + avg
         pm_m = re.search(
-            r"(-?\+?\d+)\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+\s+\d+:\d+\s*$",
+            r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+\s+\d+:\d+\s*$",
             line.strip(),
         )
         if not pm_m:
+            pm_m = re.search(
+                r"(?<![:\d])(-?\+?\d+)\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s+\d+\s+\d+:\d+\s*$",
+                line.strip(),
+            )
+        if not pm_m:
             # Truncated row: +/- precedes 3 per-period TOI columns only
             pm_m = re.search(
-                r"(-?\d+)\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s*$",
+                r"(?<![:\d])(-?\d+)\s+\d+:\d+\s+\d+:\d+\s+\d+:\d+\s*$",
                 line.strip(),
             )
         if pm_m:
@@ -246,7 +253,7 @@ def _parse_goals(text: str, jersey_map: dict[str, dict[int, str]]) -> list[dict]
         scorer = team_map.get(scorer_jersey, "")
 
         # Everything before the first "On[Ii]ce" / "Onlce" marker holds assist info.
-        pre_onice = re.split(r"On[Ii]?[lL]?[Cc]?e", rest, maxsplit=1)[0]
+        pre_onice = re.split(r"On\s*[lI]?\s*[iI]?[cC][eE]", rest, maxsplit=1)[0]
 
         # Collect jersey+name pairs from the pre-onice section.
         # Format: "86 TERAVAINEN T" or on the next line "16 BARKOV A"
@@ -256,21 +263,8 @@ def _parse_goals(text: str, jersey_map: dict[str, dict[int, str]]) -> list[dict]
         for jersey_str, _ocr_name in assist_entries:
             jersey = int(jersey_str)
             name = team_map.get(jersey, "")
-            if name:
+            if name and name not in assists:
                 assists.append(name)
-
-        # Second assister may appear on the continuation line after OnIce data
-        # Look for a "[jersey] [NAME]" right before the away-team on-ice section
-        post_onice_parts = re.split(r"On[Ii]?[lL]?[Cc]?e", rest, maxsplit=1)
-        if len(post_onice_parts) > 1:
-            continuation = post_onice_parts[1]
-            # Pattern: away team on ice is "TEAM NNN NNN ..." — find jersey+name before that
-            cont_assist = re.findall(r"(\d+)\s+([A-Z][A-Z]+(?:\s+[A-Z])?)\s+[A-Z]{3}", continuation)
-            for jersey_str, _ocr_name in cont_assist:
-                jersey = int(jersey_str)
-                name = team_map.get(jersey, "")
-                if name and name not in assists:
-                    assists.append(name)
 
         events.append(
             {
@@ -287,33 +281,23 @@ def _parse_goals(text: str, jersey_map: dict[str, dict[int, str]]) -> list[dict]
     return events
 
 
-def _calc_gwg(events: list[dict], final_home: int, final_away: int) -> str:
+def _calc_gwg(events: list[dict], home_abbr: str, final_home: int, final_away: int) -> str:
     """
-    GWG: the goal that puts the winning team exactly 1 ahead of the loser's final total.
+    GWG: the goal that first puts the winning team at loser_final+1.
     Returns the scorer's name_raw or '' if undetermined.
     """
+    if final_home == final_away:
+        return ""
     home_wins = final_home > final_away
-    winning_final = final_home if home_wins else final_away
-
+    gwg_threshold = (final_away if home_wins else final_home) + 1
     for ev in events:
-        scoring_team_is_home = _event_team_is_home(ev, events)
-        running = ev["home_score"] if scoring_team_is_home else ev["away_score"]
-        if running == winning_final and (running - 1) == (final_away if home_wins else final_home):
+        is_home_goal = ev["team"] == home_abbr
+        if home_wins != is_home_goal:
+            continue  # goal scored by the losing team
+        running = ev["home_score"] if home_wins else ev["away_score"]
+        if running == gwg_threshold:
             return ev["scorer"]
-
     return ""
-
-
-def _event_team_is_home(ev: dict, events: list[dict]) -> bool:
-    """Determine if the scoring team in this event is the home team."""
-    # The home team is the one whose score increments on a home-scored goal.
-    # We derive it from the first event where we know which way the score went.
-    # For simplicity, use the first event's team+score direction.
-    if not events:
-        return True
-    first = events[0]
-    # If score went from 0:0 → 1:0, home_score incremented → first event team is home.
-    return first["team"] == ev["team"] if first["home_score"] > 0 else first["team"] != ev["team"]
 
 
 # ── Penalties ─────────────────────────────────────────────────────────────────
@@ -391,13 +375,19 @@ def scrape_game_stats(home_team: str, away_team: str) -> pd.DataFrame:
 
     text = _ocr_pdf(pdf_resp.content)
 
+    # Goals and penalties only appear before the Goalkeeper Records section.
+    # Truncating prevents the last goal block from bleeding into Game Statistics
+    # and picking up player-stat rows as false assists or penalty entries.
+    gk_pos = re.search(r"Goalkeeper Records", text)
+    goals_text = text[:gk_pos.start()] if gk_pos else text
+
     home_abbr, away_abbr, home_score, away_score = _parse_score(text)
     jersey_map = _build_jersey_map(text, home_team, away_team)
     roster = _parse_roster(text, home_team, away_team)
-    goal_events = _parse_goals(text, jersey_map)
-    penalty_pim = _parse_penalties(text, jersey_map)
+    goal_events = _parse_goals(goals_text, jersey_map)
+    penalty_pim = _parse_penalties(goals_text, jersey_map)
     goalie_records = _parse_goalie_records(text)
-    gwg_scorer = _calc_gwg(goal_events, home_score, away_score)
+    gwg_scorer = _calc_gwg(goal_events, home_abbr, home_score, away_score)
 
     # Aggregate per-player goal stats
     goal_stats: dict[str, dict] = {}
