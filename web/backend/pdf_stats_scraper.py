@@ -52,17 +52,33 @@ def _ocr_pdf(pdf_bytes: bytes) -> str:
             images_300 = convert_from_bytes(pdf_bytes, dpi=300)
             pages_300 = [pytesseract.image_to_string(img) for img in images_300]
 
-        # Build jersey → line map from DPI=300 for this page
-        dpi300_rows: dict[str, str] = {}
+        # Build jersey → [lines] map from DPI=300 for this page.
+        # Multiple players can share the same jersey number across teams, so
+        # we collect all candidates and validate by name prefix before substituting.
+        dpi300_rows: dict[str, list[str]] = {}
         for line_300 in pages_300[i].split("\n"):  # type: ignore[index]
             m3 = _PLAYER_RE.match(line_300)
             if m3 and m3.group(2) != "GK":
-                dpi300_rows[m3.group(1)] = line_300
+                dpi300_rows.setdefault(m3.group(1), []).append(line_300)
 
         for jersey, idx in incomplete.items():
-            candidate = dpi300_rows.get(jersey)
-            if candidate and re.search(r"\d+\s+\d+:\d+\s*$", candidate):
+            candidates = dpi300_rows.get(jersey, [])
+            dpi200_m = _PLAYER_RE.match(lines[idx])
+            # First 4 chars of the surname from the DPI=200 row (reliable even when
+            # right-hand columns are truncated, since names appear near the left edge).
+            surname_200 = dpi200_m.group(3).split()[0].upper()[:4] if dpi200_m else ""
+            for candidate in candidates:
+                if not re.search(r"\d+\s+\d+:\d+\s*$", candidate):
+                    continue
+                dpi300_m = _PLAYER_RE.match(candidate)
+                if not dpi300_m:
+                    continue
+                # Reject if surnames diverge (cross-team same-jersey collision).
+                surname_300 = dpi300_m.group(3).split()[0].upper()[:4]
+                if surname_200 and surname_300 and surname_200 != surname_300:
+                    continue
                 lines[idx] = candidate
+                break
 
         pages[i] = "\n".join(lines)
 
