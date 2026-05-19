@@ -24,29 +24,47 @@ def _ocr_pdf(pdf_bytes: bytes) -> str:
     from pdf2image import convert_from_bytes
     import pytesseract
 
-    def _ocr_at(dpi: int) -> str:
-        images = convert_from_bytes(pdf_bytes, dpi=dpi)
-        return "\n".join(pytesseract.image_to_string(img) for img in images)
-
-    # OCR each page at DPI=200. Pages where 3+ skater rows have no TOI data
-    # (columns truncated by PDF layout) are re-OCR'd at DPI=300.
-    # Per-page so that good pages don't inherit DPI=300 digit-noise.
-    # GK rows are excluded — they never carry TOI in Game Statistics.
     images_200 = convert_from_bytes(pdf_bytes, dpi=200)
     pages = [pytesseract.image_to_string(img) for img in images_200]
 
-    images_300 = None  # lazy; only loaded if any page needs it
+    # Some PDFs truncate Game Statistics rows on certain pages (right-hand columns
+    # are missing). We detect incomplete skater rows — those not ending with the
+    # SHF + AVG pattern (a plain number followed by a time: e.g. "23 0:46").
+    # For each incomplete row we substitute the DPI=300 version of that row, but
+    # only if the DPI=300 version is itself complete. This avoids the digit-noise
+    # that DPI=300 introduces on rows that were already fine at DPI=200.
+    images_300 = None
+    pages_300: list[str] | None = None
+
     for i, page in enumerate(pages):
-        truncated = sum(
-            1 for line in page.split("\n")
-            if (m := _PLAYER_RE.match(line))
-            and m.group(2) != "GK"
-            and not re.search(r"\d+:\d+", line[m.end():])
-        )
-        if truncated >= 3:
-            if images_300 is None:
-                images_300 = convert_from_bytes(pdf_bytes, dpi=300)
-            pages[i] = pytesseract.image_to_string(images_300[i])
+        lines = page.split("\n")
+        # jersey → line index for incomplete skater rows on this page
+        incomplete: dict[str, int] = {}
+        for j, line in enumerate(lines):
+            m = _PLAYER_RE.match(line)
+            if m and m.group(2) != "GK" and not re.search(r"\d+\s+\d+:\d+\s*$", line):
+                incomplete[m.group(1)] = j
+
+        if not incomplete:
+            continue
+
+        if images_300 is None:
+            images_300 = convert_from_bytes(pdf_bytes, dpi=300)
+            pages_300 = [pytesseract.image_to_string(img) for img in images_300]
+
+        # Build jersey → line map from DPI=300 for this page
+        dpi300_rows: dict[str, str] = {}
+        for line_300 in pages_300[i].split("\n"):  # type: ignore[index]
+            m3 = _PLAYER_RE.match(line_300)
+            if m3 and m3.group(2) != "GK":
+                dpi300_rows[m3.group(1)] = line_300
+
+        for jersey, idx in incomplete.items():
+            candidate = dpi300_rows.get(jersey)
+            if candidate and re.search(r"\d+\s+\d+:\d+\s*$", candidate):
+                lines[idx] = candidate
+
+        pages[i] = "\n".join(lines)
 
     return "\n".join(pages)
 
@@ -98,7 +116,7 @@ def _parse_score(text: str) -> tuple[str, str, int, int]:
 # doubled position codes from OCR (FF→F, DD→D), leading dash/dash noise, and OCR
 # noise chars (!, °, %) injected into surnames (e.g. LOHRE!I → LOHREI).
 _PLAYER_RE = re.compile(
-    r"^\s*(\d+)\s*[—–_\-]?\s*([FD]{1,2}|GK)\s+[—–_\-~]*\s*"
+    r"^\s*(\d+)\s*[—–_\-*]?\s*([FD]{1,2}|GK)\s+[—–_\-~*]*\s*"
     r"([A-Z][A-Z'!°%]*(?:-[A-Z][A-Z'!°%]*)*(?:\s+[A-Z][A-Z'!°%]*(?:-[A-Z][A-Z'!°%]*)*)*\s+\w+)"
 )
 
